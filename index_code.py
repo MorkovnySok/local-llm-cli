@@ -1,3 +1,4 @@
+# index_code.py
 import argparse
 import os
 import hashlib
@@ -5,7 +6,8 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 import pathspec
 
-EXTENSIONS = [".py"]
+EXTENSIONS = [".js", ".json", ".md"]
+MAX_BATCH_SIZE = 500  # Safe batch size for ChromaDB
 
 
 def get_hash(path: str) -> str:
@@ -32,6 +34,8 @@ def load_chunks(source_dir: str, chunk_size=800):
     spec = load_gitignore(source_dir)
 
     print(f"Extensions to be processed {EXTENSIONS}")
+    # files_count = len(os.listdir(source_dir))
+    # print(f"Total files count - {files_count}")
     for root, _, files in os.walk(source_dir):
         for f in files:
             full_path = os.path.join(root, f)
@@ -40,7 +44,7 @@ def load_chunks(source_dir: str, chunk_size=800):
                 continue
 
             if any(f.endswith(ext) for ext in EXTENSIONS):
-                print(f"Reading file - {full_path}")
+                # print(f"Reading file - {full_path}")
                 with open(full_path, encoding="utf-8", errors="ignore") as file:
                     content = file.read()
                     for i in range(0, len(content), chunk_size):
@@ -48,6 +52,20 @@ def load_chunks(source_dir: str, chunk_size=800):
                         chunks.append(chunk)
 
     return chunks
+
+
+def add_to_collection_in_batches(collection, documents, embeddings):
+    total = len(documents)
+    for i in range(0, total, MAX_BATCH_SIZE):
+        batch_docs = documents[i:i + MAX_BATCH_SIZE]
+        batch_embs = embeddings[i:i + MAX_BATCH_SIZE]
+        batch_ids = [f"id_{i+j}" for j in range(len(batch_docs))]
+
+        collection.add(
+            documents=batch_docs,
+            embeddings=batch_embs,
+            ids=batch_ids
+        )
 
 
 def main():
@@ -72,12 +90,10 @@ def main():
     print(f"Indexing source code at {path}...")
     model = SentenceTransformer("all-MiniLM-L6-v2")
     chunks = load_chunks(path)
-    embeddings = model.encode(chunks).tolist()
-    collection.add(
-        documents=chunks,
-        embeddings=embeddings,
-        ids=[f"id_{i}" for i in range(len(chunks))]
-    )
+    embeddings = model.encode(chunks, show_progress_bar=True).tolist()
+
+    add_to_collection_in_batches(collection, chunks, embeddings)
+
     print(f"✅ Indexed {len(chunks)} chunks.")
     print(f"All existing collections: {chroma_client.list_collections()}")
 

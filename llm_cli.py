@@ -14,6 +14,8 @@ from sentence_transformers import SentenceTransformer
 console = Console()
 chroma_client = chromadb.PersistentClient(path="chroma_db")
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+EMBEDDING_RESULTS = 20
+TEMPERATURE = 0.3
 
 
 def is_ollama_running():
@@ -75,17 +77,20 @@ def get_context_from_embeddings(path: str, query: str) -> str:
         raise RuntimeError(f"No index found for path: {path}")
 
     query_embedding = embedding_model.encode([query]).tolist()[0]
-    results = collection.query(query_embeddings=[query_embedding], n_results=5)
+    results = collection.query(
+        query_embeddings=[query_embedding], n_results=EMBEDDING_RESULTS)
     context_chunks = results["documents"][0]
     return "\n---\n".join(context_chunks)
 
 
 def build_prompt(context: str, query: str) -> str:
-    return f"""You are an assistant that answers questions about code.
+    return f"""You are an assistant that answers questions about code based ONLY on the provided context.
+You are permitted to make suggestions if you can't bet your life on it that it's from the context
+If the answer is not contained within the context, say "I don't know."
 Context:
 {context}
 
-Question: {query}
+Question: {query} in the context
 Answer:"""
 
 
@@ -95,7 +100,10 @@ def stream_local_chat(model: str, prompt: str):
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "stream": True
+        "stream": True,
+        "options": {
+            "temperature": TEMPERATURE
+        }
     }
 
     with httpx.stream("POST", url, headers=headers, json=payload, timeout=None) as response:
@@ -132,8 +140,9 @@ def is_path_indexed(path: str) -> bool:
     collection_name = "project_index_" + path_hash[:10]
     try:
         collection = chroma_client.get_collection(name=collection_name)
-        return len(collection.get()["ids"]) > 0
-    except:
+        ids = collection.get(limit=1).get("ids", [])
+        return len(ids) > 0
+    except Exception:
         return False
 
 

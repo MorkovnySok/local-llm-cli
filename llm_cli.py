@@ -1,3 +1,4 @@
+# llm_cli.py
 import argparse
 import httpx
 from rich.console import Console
@@ -8,8 +9,11 @@ import time
 import os
 import hashlib
 import chromadb
+from sentence_transformers import SentenceTransformer
 
 console = Console()
+chroma_client = chromadb.PersistentClient(path="chroma_db")
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def is_ollama_running():
@@ -29,7 +33,7 @@ def try_start_ollama():
 
     try:
         subprocess.Popen([ollama_path, "serve"])
-        time.sleep(2)  # Give Ollama time to start
+        time.sleep(2)
         if is_ollama_running():
             console.print("[green]✅ Ollama started successfully[/green]")
             return True
@@ -55,6 +59,34 @@ def ensure_model_available(model: str):
     except Exception as e:
         console.print(f"[red]Failed to check or pull model: {e}[/red]")
         exit(1)
+
+
+def get_path_hash(path: str) -> str:
+    return hashlib.sha256(path.encode()).hexdigest()
+
+
+def get_context_from_embeddings(path: str, query: str) -> str:
+    path_hash = get_path_hash(path)
+    collection_name = "project_index_" + path_hash[:10]
+
+    try:
+        collection = chroma_client.get_collection(collection_name)
+    except:
+        raise RuntimeError(f"No index found for path: {path}")
+
+    query_embedding = embedding_model.encode([query]).tolist()[0]
+    results = collection.query(query_embeddings=[query_embedding], n_results=5)
+    context_chunks = results["documents"][0]
+    return "\n---\n".join(context_chunks)
+
+
+def build_prompt(context: str, query: str) -> str:
+    return f"""You are an assistant that answers questions about code.
+Context:
+{context}
+
+Question: {query}
+Answer:"""
 
 
 def stream_local_chat(model: str, prompt: str):
@@ -95,12 +127,7 @@ def stream_remote_chat(path: str, query: str):
         console.print(f"[red]Failed to query remote API: {e}[/red]")
 
 
-def get_path_hash(path: str) -> str:
-    return hashlib.sha256(path.encode()).hexdigest()
-
-
 def is_path_indexed(path: str) -> bool:
-    chroma_client = chromadb.PersistentClient(path="chroma_db")
     path_hash = get_path_hash(path)
     collection_name = "project_index_" + path_hash[:10]
     try:
@@ -128,21 +155,22 @@ def main():
     parser.add_argument("--path", required=True, help="Path to project")
     parser.add_argument("--query", required=True,
                         help="Natural language question to ask")
-    parser.add_argument("--model", default="deepseek-coder:6.7b",
-                        help="LLM model name")
+    parser.add_argument(
+        "--model", default="deepseek-coder:6.7b", help="LLM model name")
     parser.add_argument("--local", action="store_true",
                         help="Use local Ollama API instead of FastAPI app")
     parser.add_argument("--reindex", action="store_true",
                         help="Force reindexing of the codebase")
 
     args = parser.parse_args()
-
     abs_path = os.path.abspath(args.path)
 
     if not os.path.exists(abs_path):
         console.print(f"[red]Error: Provided path does not exist: {
                       abs_path}[/red]")
         exit(1)
+
+    run_indexer(abs_path, force=args.reindex)
 
     if args.local:
         if not is_ollama_running():
@@ -151,10 +179,16 @@ def main():
             if not try_start_ollama():
                 return
         ensure_model_available(args.model)
-        prompt = f"Project path: {abs_path}\n\nQuestion: {args.query}"
+
+        try:
+            context = get_context_from_embeddings(abs_path, args.query)
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            return
+
+        prompt = build_prompt(context, args.query)
         stream_local_chat(args.model, prompt)
     else:
-        run_indexer(abs_path, force=args.reindex)
         stream_remote_chat(abs_path, args.query)
 
 
